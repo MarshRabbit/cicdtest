@@ -1,0 +1,65 @@
+name: Build and Push Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_id:
+        description: 'Deployment ID'
+        required: true
+      environment:
+        description: 'Environment'
+        required: true
+      service_name:
+        description: 'Service name'
+        required: true
+
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-northeast-2.amazonaws.com
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Get short SHA
+        id: sha
+        run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+      
+      - name: Build and push
+        run: |
+          docker build -t ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}:${{ steps.sha.outputs.SHORT_SHA }} .
+          docker tag ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}:${{ steps.sha.outputs.SHORT_SHA }} \
+                     ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}:latest
+          docker push ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}:${{ steps.sha.outputs.SHORT_SHA }}
+          docker push ${{ env.ECR_REGISTRY }}/${{ inputs.service_name }}:latest
+      
+      - name: Notify Kube-Garden
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          CONCLUSION=$([ "$STATUS" == "success" ] && echo "success" || echo "failure")
+          
+          curl -X POST "${{ secrets.KUBE_GARDEN_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -H "X-Hub-Signature-256: sha256=${{ secrets.WEBHOOK_SECRET }}" \
+            -d "{
+              \"workflow_run\": {
+                \"name\": \"deploy-${{ inputs.deployment_id }}\",
+                \"conclusion\": \"$CONCLUSION\",
+                \"head_sha\": \"${{ github.sha }}\"
+              }
+            }"
